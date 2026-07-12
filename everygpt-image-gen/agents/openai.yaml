@@ -1,0 +1,7 @@
+interface:
+  display_name: "EveryGPT Image Gen"
+  short_description: "Generate or edit images via EveryGPT API"
+  icon_small: "./assets/icon.svg"
+  icon_large: "./assets/logo.svg"
+  brand_color: "#111827"
+  default_prompt: "Use $everygpt-image-gen to generate an image with EveryGPT."
