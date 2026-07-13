@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
+import ipaddress
 import json
 import mimetypes
 import os
 import re
+import socket
 import sys
 import tempfile
 import time
@@ -108,9 +111,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--size", help="Explicit pixel size, for example 3840x2160.")
     parser.add_argument("--aspect-ratio", choices=ASPECT_RATIOS, help="Aspect ratio; maps to an exact size for known models.")
     parser.add_argument("--quality", help="Quality value when supported by the selected model.")
-    parser.add_argument("--response-format", choices=("url", "b64_json"), help="Preferred response format.")
+    parser.add_argument(
+        "--response-format",
+        choices=("url", "b64_json"),
+        default="url",
+        help="Preferred response format; defaults to url to avoid large Base64 responses.",
+    )
     parser.add_argument("--n", type=int, default=1, help="Number of images to request.")
     parser.add_argument("--timeout", type=int, default=300, help="HTTP timeout in seconds.")
+    parser.add_argument(
+        "--origin-ip",
+        help="Connect directly to the configured API hostname at this IP, bypassing Cloudflare for long image requests.",
+    )
     return parser.parse_args()
 
 
@@ -118,14 +130,64 @@ def api_url(base_url: str, path: str) -> str:
     return f"{base_url.rstrip('/')}{path}"
 
 
-def request_json(request: urllib.request.Request, timeout: int) -> Any:
+def is_direct_origin_request(request: urllib.request.Request, origin_ip: str) -> bool:
+    if not origin_ip:
+        return False
+    hostname = urllib.parse.urlparse(request.full_url).hostname
+    base_hostname = urllib.parse.urlparse(DEFAULT_BASE_URL).hostname
+    return bool(hostname and base_hostname and hostname.lower() == base_hostname.lower())
+
+
+def open_request(request: urllib.request.Request, timeout: int, origin_ip: str = ""):
+    """Open an API request while optionally bypassing the CDN at the DNS layer."""
+    if not is_direct_origin_request(request, origin_ip):
+        return urllib.request.urlopen(request, timeout=timeout)
+
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        ipaddress.ip_address(origin_ip)
+    except ValueError:
+        fail(f"invalid origin IP address: {origin_ip}")
+
+    hostname = urllib.parse.urlparse(request.full_url).hostname
+    original_getaddrinfo = socket.getaddrinfo
+
+    def resolve_origin(host: str, port: int, family: int = 0, type: int = 0,
+                       proto: int = 0, flags: int = 0):
+        if hostname and host.lower() == hostname.lower():
+            return original_getaddrinfo(origin_ip, port, family, type, proto, flags)
+        return original_getaddrinfo(host, port, family, type, proto, flags)
+
+    socket.getaddrinfo = resolve_origin
+    try:
+        # Keep the HTTPS URL so its SNI and Host header match the certificate;
+        # bypass local HTTP proxies because they would put Cloudflare back in
+        # the request path.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        return opener.open(request, timeout=timeout)
+    finally:
+        socket.getaddrinfo = original_getaddrinfo
+
+
+def request_json(request: urllib.request.Request, timeout: int, origin_ip: str = "") -> Any:
+    try:
+        with open_request(request, timeout, origin_ip) as response:
             text = response.read().decode("utf-8")
+    except (http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError, TimeoutError) as exc:
+        fail(
+            "request connection closed before the JSON response arrived "
+            f"({exc.__class__.__name__}). The generation may already be complete and billed; "
+            "do not retry automatically. Check the EveryGPT log by request time before retrying."
+        )
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         fail(f"request failed with HTTP {exc.code}: {body[:500]}")
     except urllib.error.URLError as exc:
+        if isinstance(exc.reason, (http.client.RemoteDisconnected, ConnectionResetError, BrokenPipeError, TimeoutError)):
+            fail(
+                "request connection closed before the JSON response arrived. "
+                "The generation may already be complete and billed; do not retry automatically. "
+                "Check the EveryGPT log by request time before retrying."
+            )
         fail(f"request failed: {exc.reason}")
     try:
         return json.loads(text)
@@ -133,12 +195,12 @@ def request_json(request: urllib.request.Request, timeout: int) -> Any:
         fail(f"response is not JSON: {text[:500]}")
 
 
-def get_models(base_url: str, api_key: str, timeout: int) -> list[dict[str, Any]]:
+def get_models(base_url: str, api_key: str, timeout: int, origin_ip: str = "") -> list[dict[str, Any]]:
     request = urllib.request.Request(
         api_url(base_url, "/models"),
         headers={"Accept": "application/json", "Authorization": f"Bearer {api_key}", "User-Agent": USER_AGENT},
     )
-    payload = request_json(request, timeout)
+    payload = request_json(request, timeout, origin_ip)
     if isinstance(payload, dict):
         items = payload.get("data", payload.get("models", []))
     else:
@@ -209,7 +271,7 @@ def encode_multipart(fields: dict[str, Any], files: list[tuple[str, Path]]) -> t
     return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
 
 
-def post(url: str, api_key: str, data: bytes, content_type: str, timeout: int) -> dict[str, Any]:
+def post(url: str, api_key: str, data: bytes, content_type: str, timeout: int, origin_ip: str = "") -> dict[str, Any]:
     request = urllib.request.Request(
         url,
         data=data,
@@ -221,7 +283,7 @@ def post(url: str, api_key: str, data: bytes, content_type: str, timeout: int) -
             "User-Agent": USER_AGENT,
         },
     )
-    payload = request_json(request, timeout)
+    payload = request_json(request, timeout, origin_ip)
     if not isinstance(payload, dict):
         fail("response JSON is not an object")
     return payload
@@ -287,10 +349,13 @@ def main() -> None:
         config["api_key"] = args.api_key
     api_key = str(config.get("api_key") or "").strip()
     base_url = str(args.base_url or config.get("base_url") or DEFAULT_BASE_URL).rstrip("/")
+    origin_ip = str(
+        args.origin_ip or config.get("origin_ip") or os.environ.get("EVERYGPT_ORIGIN_IP") or ""
+    ).strip()
     if not api_key:
         fail("API key is not configured. Ask the user for a key and store it in references/local_config.json.")
     if args.list_models:
-        print_image_models(get_models(base_url, api_key, args.timeout))
+        print_image_models(get_models(base_url, api_key, args.timeout, origin_ip))
         return
     if not args.prompt:
         fail("prompt is required unless --list-models is used")
@@ -306,10 +371,10 @@ def main() -> None:
     fields = optional_fields(args, size)
     if image_paths:
         body, content_type = encode_multipart(fields, [("image", path) for path in image_paths])
-        payload = post(api_url(base_url, "/images/edits"), api_key, body, content_type, args.timeout)
+        payload = post(api_url(base_url, "/images/edits"), api_key, body, content_type, args.timeout, origin_ip)
     else:
         body = json.dumps(fields, ensure_ascii=False).encode("utf-8")
-        payload = post(api_url(base_url, "/images/generations"), api_key, body, "application/json", args.timeout)
+        payload = post(api_url(base_url, "/images/generations"), api_key, body, "application/json", args.timeout, origin_ip)
     for saved_path in save_images(payload, args.prompt, Path(args.output_dir).expanduser(), args.timeout):
         print(saved_path)
 

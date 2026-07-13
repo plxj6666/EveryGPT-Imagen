@@ -14,6 +14,7 @@ Read `references/local_config.json` before any API call. On a fresh install, cre
 - If `api_key` is empty, ask the user to provide their EveryGPT API key. Do not call the API until they do.
 - Persist the key in that same file, keeping `base_url` as `https://api.everygpt.site/v1`. Do not copy keys into logs, screenshots, generated artifacts, or the final response. Do not commit `local_config.json`.
 - The Python script also persists a key passed with `--api-key`; do not put a supplied key on a shared terminal command line.
+- For long-running image requests, an optional `origin_ip` in `references/local_config.json` (or `EVERYGPT_ORIGIN_IP`) makes the script connect directly to the API origin while retaining the HTTPS hostname for certificate validation. Use this only when the IP is the current EveryGPT origin; it bypasses Cloudflare's synchronous request timeout.
 
 ## Model And Size Selection
 
@@ -37,7 +38,7 @@ Pass the selected ratio as `--aspect-ratio`; the script sends the corresponding 
 
 ## Generate
 
-Use the Python script because it has no third-party dependencies and saves images to the system temporary directory by default:
+Use the Python script because it has no third-party dependencies and saves images to the system temporary directory by default. It requests `response_format=url` by default and downloads the returned URL immediately, avoiding unnecessarily large Base64 responses:
 
 ```bash
 python3 /path/to/everygpt-image-gen/scripts/generate_image.py "A cinematic product photo of a matte black smart speaker on a clean desk" --model gpt-image2-1k --aspect-ratio 1:1
@@ -50,6 +51,8 @@ python3 /path/to/everygpt-image-gen/scripts/generate_image.py "Keep the product 
 ```
 
 After generation, read the absolute paths printed by the script. Render each result in the response with Markdown image syntax and state that it was saved in the temporary directory.
+
+If a request reports that the connection closed before JSON arrived, do not retry immediately: the upstream generation may already have completed and been billed. Check the EveryGPT log by request time first. A direct `origin_ip` avoids the usual cause for 4K requests.
 
 ## Prompting
 

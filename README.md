@@ -39,6 +39,8 @@ chmod 600 references/local_config.json
 
 Open `references/local_config.json` in an editor and set `api_key` to your EveryGPT key. Leave `base_url` as `https://api.everygpt.site/v1` unless you intentionally use a compatible endpoint.
 
+For long-running synchronous image requests that would otherwise traverse Cloudflare, an API operator can optionally add the current API origin IP as `origin_ip`. The script retains the HTTPS hostname for certificate validation while connecting directly to that origin. Do not guess, publish, or commit this value; it can change. The template keeps it empty by default.
+
 `references/local_config.json` is ignored by Git and is not included in this repository. Never commit, share, paste into prompts, or place an API key in screenshots. Avoid passing a key through `--api-key` on a shared terminal because shell history and process listings can expose it.
 
 ## Use With Codex
@@ -54,7 +56,8 @@ The skill follows this workflow:
 1. Read the local configuration. If no key is configured, ask for one and store it only in `references/local_config.json`.
 2. Query `/models`. If the user did not specify a model, show image-capable models and ask them to choose.
 3. If neither a pixel size nor an aspect ratio was provided, show the five supported aspect ratios and their exact pixel sizes for the selected model, then ask the user to choose.
-4. Generate or edit the image, save it to a temporary directory, and render the saved image path in the response.
+4. Use `response_format=url` by default, generate or edit the image, download the result, save it to a temporary directory, and render the saved image path in the response.
+5. If the connection closes before a JSON response arrives, do not automatically retry. Check the provider log first because the generation may have completed and been billed.
 
 Expected image models are `gpt-image2-1k`, `gpt-image2-2k`, and `gpt-image2-4k`. The API remains the source of truth: the model list is fetched at generation time.
 
@@ -105,6 +108,18 @@ python3 everygpt-image-gen/scripts/generate_image.py \
   --output-dir ./generated-images
 ```
 
+Use a configured origin IP for a long-running request:
+
+```bash
+python3 everygpt-image-gen/scripts/generate_image.py \
+  "Wide cinematic product scene" \
+  --model gpt-image2-4k \
+  --aspect-ratio 16:9 \
+  --origin-ip "CURRENT_ORIGIN_IP"
+```
+
+Replace `CURRENT_ORIGIN_IP` only with an IP supplied by the API operator. Do not put it in this repository or in shared configuration.
+
 Edit a reference image:
 
 ```bash
@@ -123,7 +138,7 @@ python3 everygpt-image-gen/scripts/generate_image.py \
 - Authentication: `Authorization: Bearer <api key>`
 - Supported image responses: `data[].b64_json`, `data[].url`, and `data[].image_url`
 
-Generated URLs can expire, so the script downloads URL-based results immediately. Temporary output files may be removed by the operating system; pass `--output-dir` when results must be retained.
+The default `response_format=url` keeps API JSON responses small; the script downloads URL-based results immediately because generated URLs can expire. A connection reset or `RemoteDisconnected` leaves the request outcome unknown: it may already be complete and billed. The script intentionally does not retry it automatically. Temporary output files may be removed by the operating system; pass `--output-dir` when results must be retained.
 
 ## Repository Layout
 

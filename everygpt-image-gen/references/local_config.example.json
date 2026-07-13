@@ -1,4 +1,5 @@
 {
   "base_url": "https://api.everygpt.site/v1",
-  "api_key": ""
+  "api_key": "",
+  "origin_ip": ""
 }

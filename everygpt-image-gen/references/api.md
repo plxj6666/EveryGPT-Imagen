@@ -34,6 +34,8 @@ When the user selects an aspect ratio, resolve the exact `size` from this table 
 | `gpt-image2-2k` | 2048x2048 | 1536x2048 | 2048x1536 | 1152x2048 | 2048x1152 |
 | `gpt-image2-4k` | 4096x4096 | 3072x4096 | 4096x3072 | 2160x3840 | 3840x2160 |
 
+The bundled script defaults to `response_format: "url"` and downloads the returned image immediately. This keeps the API response small; it does not reduce the model's generation time.
+
 Offer those five ratios when the user has not provided one. Pass a user-supplied explicit pixel size unchanged. Use an explicit size for other models.
 
 ## Edit Body
